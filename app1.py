@@ -10,18 +10,19 @@ from statsmodels.formula.api import ols
 import os
 import warnings
 
-# Suppress minor statsmodels optimization warnings for performance speed
 warnings.filterwarnings('ignore')
 
 # ==============================================================================
-# 1. DATA LOADING, REFACTORING & TWO-WAY ANOVA CALCULATION ENGINE
+# 1. BULLETPROOF DATA LOADING & DEFENSIVE TWO-WAY ANOVA CALCULATIONS
 # ==============================================================================
-print("Loading proteomics matrix and mapping factorial design factors...")
+print("🚀 Loading Proteomics Matrix...")
 
 data_file = 'Proteomics_data.csv'
+if not os.path.exists(data_file):
+    raise FileNotFoundError(f"CRITICAL ERROR: Could not find '{data_file}' in this folder. Please verify the filename.")
+
 df = pd.read_csv(data_file)
 
-# Define biological replicate mapping groups
 group_cols = {
     'Naive (Healthy Control)': ['1.1', '1.2', '1.3', '1.4'],
     'AL (Pathologically Primed)': ['4.1', '4.2', '4.3', '4.4'],
@@ -32,46 +33,42 @@ group_cols = {
 }
 all_samples = sum(group_cols.values(), [])
 
-# Clean rows and remove string quote formatting quirks
+# --- STEP 1: FORCE ABSOLUTE NUMERIC CLEANING ---
 df_clean = df.dropna(subset=all_samples).copy()
 for col in all_samples:
-    df_clean[col] = pd.to_numeric(df_clean[col].astype(str).str.replace("'", ""), errors='coerce')
+    # Coerce errors to NaN to eliminate single quotes or hidden spaces, then drop them
+    df_clean[col] = pd.to_numeric(df_clean[col].astype(str).str.replace("'", "").str.strip(), errors='coerce')
 df_clean = df_clean.dropna(subset=all_samples).copy()
 
-# Parse tidy gene symbols
+# Parse tidy gene symbols cleanly
 df_clean['gene_name'] = df_clean['T: Genes'].fillna(df_clean['T: Protein.Group']).apply(lambda x: str(x).split(';')[0])
 
-# Create the Factor Design framework for mapping individual sample IDs to factors
-# Factor 1: Priming (Healthy vs Primed State)
-# Factor 2: Therapy Type (Control vs Fasting vs Lipids)
+print(f" -> Cleaned Data Matrix successfully! Processing {len(df_clean)} verified protein rows.")
+
+# --- STEP 2: MAP FACTORIAL METADATA ---
 sample_design = []
 for grp, samples in group_cols.items():
     for s in samples:
-        # Categorize metadata per sample
-        if 'Naive' in grp:
-            priming = 'Healthy'
-            therapy = 'None'
-        elif 'AL' in grp:
-            priming = 'Primed'
+        priming = 'Healthy' if 'Naive' in grp else 'Primed'
+        if 'Naive' in grp or 'AL' in grp:
             therapy = 'None'
         elif 'IF' in grp:
-            priming = 'Primed'
             therapy = 'Fasting'
         else:
-            priming = 'Primed'
             therapy = 'Lipid_Supplement'
-        
         sample_design.append({'SampleID': s, 'Priming': priming, 'Therapy': therapy})
 
 design_df = pd.DataFrame(sample_design)
 
-# Setup master metrics registry
+# Setup analytics grids
 master_stats_df = df_clean[['gene_name', 'T: Protein.Group', 'T: First.Protein.Description']].copy()
 
-# 1. Individual pair-wise log2 Fold Changes versus the disease-primed model baseline (AL)
-al_means = np.mean(df_clean[group_cols['AL (Pathologically Primed)']].values, axis=1)
-tx_groups = ['IF (Intermittent Fasting)', 'L-Carnitine', 'LPE 18:1', 'LPC 17:0']
+# --- STEP 3: PAIRWISE LOG2 FOLD CHANGES VS AL ---
+print("Calculating Log2 Fold Changes and T-Tests vs AL baseline...")
+al_matrix = df_clean[group_cols['AL (Pathologically Primed)']].values.astype(float)
+al_means = np.mean(al_matrix, axis=1)
 
+tx_groups = ['IF (Intermittent Fasting)', 'L-Carnitine', 'LPE 18:1', 'LPC 17:0']
 for tx in tx_groups:
     tx_matrix = df_clean[group_cols[tx]].values.astype(float)
     short_name = tx.split(' ')[0]
@@ -79,48 +76,59 @@ for tx in tx_groups:
     
     pvals = []
     for i in range(len(df_clean)):
-        _, p = stats.ttest_ind(tx_matrix[i], df_clean[group_cols['AL (Pathologically Primed)']].values[i], equal_var=False)
-        pvals.append(p if not np.isnan(p) else 1.0)
+        # Calculate standard pair t-tests safely
+        _, p = stats.ttest_ind(tx_matrix[i], al_matrix[i], equal_var=False)
+        pvals.append(p if (not np.isnan(p) and p > 0) else 1.0)
     master_stats_df[f'pvalue_{short_name}_vs_AL'] = pvals
 
-# 2. RUN TWO-WAY ANOVA ROW-BY-ROW ACROSS THE PROTEOME
-print("Calculating Linear Models & Two-Way ANOVA matrices row-by-row...")
+# --- STEP 4: SAFE ROW-BY-ROW TWO-WAY ANOVA ---
+print("Running Defensive Ordinary Least Squares (OLS) Two-Way ANOVA Engine...")
 p_priming_effect = []
 p_therapy_effect = []
 p_interaction_effect = []
 
 for idx, row in df_clean.iterrows():
-    # Build expression list for current protein sample configuration 
+    # Gather expression levels for current protein row configuration
     expr_vals = [float(row[s]) for s in design_df['SampleID']]
     current_model_df = design_df.copy()
     current_model_df['Expression'] = expr_vals
     
-    try:
-        # Fit Ordinary Least Squares (OLS) Linear Model: Expression ~ Priming + Therapy + Priming*Therapy
-        model = ols('Expression ~ C(Priming) * C(Therapy)', data=current_model_df).fit()
-        anova_table = sm.stats.anova_lm(model, typ=2) # Type II Sum of Squares
+    # Verify non-zero variance before optimizing regression matrices
+    if np.var(expr_vals) == 0:
+        p_priming_effect.append(1.0)
+        p_therapy_effect.append(1.0)
+        p_interaction_effect.append(1.0)
+        continue
         
-        p_priming_effect.append(anova_table.loc['C(Priming)', 'PR(>F)'])
-        p_therapy_effect.append(anova_table.loc['C(Therapy)', 'PR(>F)'])
-        p_interaction_effect.append(anova_table.loc['C(Priming):C(Therapy)', 'PR(>F)'])
+    try:
+        # Fit OLS Model safely
+        model = ols('Expression ~ C(Priming) * C(Therapy)', data=current_model_df).fit()
+        anova_table = sm.stats.anova_lm(model, typ=2)
+        
+        p_p = anova_table.loc['C(Priming)', 'PR(>F)']
+        p_t = anova_table.loc['C(Therapy)', 'PR(>F)']
+        p_i = anova_table.loc['C(Priming):C(Therapy)', 'PR(>F)']
+        
+        p_priming_effect.append(p_p if not np.isnan(p_p) else 1.0)
+        p_therapy_effect.append(p_t if not np.isnan(p_t) else 1.0)
+        p_interaction_effect.append(p_i if not np.isnan(p_i) else 1.0)
     except Exception:
-        # Fallback values if data matrix variance equals zero for an obscure row
+        # Fallback values if a singular row matrix is ill-conditioned or mathematically unstable
         p_priming_effect.append(1.0)
         p_therapy_effect.append(1.0)
         p_interaction_effect.append(1.0)
 
-# Merge calculations back into master output grids
+# Inject array outputs back into master data sheets
 master_stats_df['ANOVA_p_PrimingEffect'] = p_priming_effect
 master_stats_df['ANOVA_p_TherapyEffect'] = p_therapy_effect
 master_stats_df['ANOVA_p_InteractionEffect'] = p_interaction_effect
+df_clean['anova_pvalue'] = p_interaction_effect
 
-# Maintain structural references inside active visual tabs 
-df_clean['anova_pvalue'] = p_interaction_effect  # Use Interaction Term as default sorting index
-
-# Export processed tables and figures to folder automatically
+print("Two-Way ANOVA Complete! Exporting compiled master tables...")
 os.makedirs('Exported_Plots_2Way', exist_ok=True)
 master_stats_df.to_csv('complete_proteomics_TwoWayANOVA_stats.csv', index=False)
-print("Saved complete statistics file: complete_proteomics_TwoWayANOVA_stats.csv")
+
+print("All systems initialized! Initializing layout dashboard wrapper...")
 
 # ==============================================================================
 # 2. DASHBOARD WEB INTERFACE DESIGN
