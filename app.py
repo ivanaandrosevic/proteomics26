@@ -5,24 +5,25 @@ import numpy as np
 import plotly.express as px
 import plotly.graph_objects as go
 import scipy.stats as stats
-import statsmodels.api as sm
-from statsmodels.formula.api import ols
 import os
-import warnings
-
-warnings.filterwarnings('ignore')
 
 # ==============================================================================
-# DATA LOADING & TWO-WAY ANOVA
+# 1. INSTANT-LOADING CLOUD ARCHITECTURE (PRE-CALCULATED DB)
 # ==============================================================================
-print("🚀 Loading Proteomics Matrix...")
+print("🚀 Loading pre-calculated proteomics database...")
 
-data_file = 'Proteomics_data.csv'
-if not os.path.exists(data_file):
-    raise FileNotFoundError(f"CRITICAL ERROR: Could not find '{data_file}' in this folder. Please verify the filename.")
+# We load the data directly from the processed CSV to bypass the 60-second cloud timeout limit
+data_file = 'complete_proteomics_TwoWayANOVA_stats.csv'
+raw_file = 'Proteomics_data.csv'
 
-df = pd.read_csv(data_file)
+if not os.path.exists(data_file) or not os.path.exists(raw_file):
+    raise FileNotFoundError("Make sure both Proteomics_data.csv and complete_proteomics_TwoWayANOVA_stats.csv are uploaded!")
 
+# Master pre-calculated statistical tables
+master_stats_df = pd.read_csv(data_file)
+df_clean = pd.read_csv(raw_file)
+
+# Maintain structural mapping definitions for charts
 group_cols = {
     'Naive (Healthy Control)': ['1.1', '1.2', '1.3', '1.4'],
     'AL (Pathologically Primed)': ['4.1', '4.2', '4.3', '4.4'],
@@ -32,113 +33,24 @@ group_cols = {
     'LPC 17:0': ['9.1', '9.2', '9.3', '9.4']
 }
 all_samples = sum(group_cols.values(), [])
+tx_groups = ['IF (Intermittent Fasting)', 'L-Carnitine', 'LPE 18:1', 'LPC 17:0']
 
-# --- STEP 1: FORCE ABSOLUTE NUMERIC CLEANING ---
-df_clean = df.dropna(subset=all_samples).copy()
+# Ensure string cleanup mirrors local state safely
 for col in all_samples:
-    # Coerce errors to NaN to eliminate single quotes or hidden spaces, then drop them
     df_clean[col] = pd.to_numeric(df_clean[col].astype(str).str.replace("'", "").str.strip(), errors='coerce')
 df_clean = df_clean.dropna(subset=all_samples).copy()
-
-# Parse tidy gene symbols cleanly
 df_clean['gene_name'] = df_clean['T: Genes'].fillna(df_clean['T: Protein.Group']).apply(lambda x: str(x).split(';')[0])
+df_clean['anova_pvalue'] = master_stats_df['ANOVA_p_InteractionEffect']
 
-print(f" -> Cleaned Data Matrix successfully! Processing {len(df_clean)} verified protein rows.")
-
-# --- STEP 2: MAP FACTORIAL METADATA ---
-sample_design = []
-for grp, samples in group_cols.items():
-    for s in samples:
-        priming = 'Healthy' if 'Naive' in grp else 'Primed'
-        if 'Naive' in grp or 'AL' in grp:
-            therapy = 'None'
-        elif 'IF' in grp:
-            therapy = 'Fasting'
-        else:
-            therapy = 'Lipid_Supplement'
-        sample_design.append({'SampleID': s, 'Priming': priming, 'Therapy': therapy})
-
-design_df = pd.DataFrame(sample_design)
-
-# Setup analytics grids
-master_stats_df = df_clean[['gene_name', 'T: Protein.Group', 'T: First.Protein.Description']].copy()
-
-# --- STEP 3: PAIRWISE LOG2 FOLD CHANGES VS AL ---
-print("Calculating Log2 Fold Changes and T-Tests vs AL baseline...")
-al_matrix = df_clean[group_cols['AL (Pathologically Primed)']].values.astype(float)
-al_means = np.mean(al_matrix, axis=1)
-
-tx_groups = ['IF (Intermittent Fasting)', 'L-Carnitine', 'LPE 18:1', 'LPC 17:0']
-for tx in tx_groups:
-    tx_matrix = df_clean[group_cols[tx]].values.astype(float)
-    short_name = tx.split(' ')[0]
-    master_stats_df[f'log2FC_{short_name}_vs_AL'] = np.mean(tx_matrix, axis=1) - al_means
-    
-    pvals = []
-    for i in range(len(df_clean)):
-        # Calculate standard pair t-tests safely
-        _, p = stats.ttest_ind(tx_matrix[i], al_matrix[i], equal_var=False)
-        pvals.append(p if (not np.isnan(p) and p > 0) else 1.0)
-    master_stats_df[f'pvalue_{short_name}_vs_AL'] = pvals
-
-# --- STEP 4: SAFE ROW-BY-ROW TWO-WAY ANOVA ---
-print("Running Defensive Ordinary Least Squares (OLS) Two-Way ANOVA Engine...")
-p_priming_effect = []
-p_therapy_effect = []
-p_interaction_effect = []
-
-for idx, row in df_clean.iterrows():
-    # Gather expression levels for current protein row configuration
-    expr_vals = [float(row[s]) for s in design_df['SampleID']]
-    current_model_df = design_df.copy()
-    current_model_df['Expression'] = expr_vals
-    
-    # Verify non-zero variance before optimizing regression matrices
-    if np.var(expr_vals) == 0:
-        p_priming_effect.append(1.0)
-        p_therapy_effect.append(1.0)
-        p_interaction_effect.append(1.0)
-        continue
-        
-    try:
-        # Fit OLS Model safely
-        model = ols('Expression ~ C(Priming) * C(Therapy)', data=current_model_df).fit()
-        anova_table = sm.stats.anova_lm(model, typ=2)
-        
-        p_p = anova_table.loc['C(Priming)', 'PR(>F)']
-        p_t = anova_table.loc['C(Therapy)', 'PR(>F)']
-        p_i = anova_table.loc['C(Priming):C(Therapy)', 'PR(>F)']
-        
-        p_priming_effect.append(p_p if not np.isnan(p_p) else 1.0)
-        p_therapy_effect.append(p_t if not np.isnan(p_t) else 1.0)
-        p_interaction_effect.append(p_i if not np.isnan(p_i) else 1.0)
-    except Exception:
-        # Fallback values if a singular row matrix is ill-conditioned or mathematically unstable
-        p_priming_effect.append(1.0)
-        p_therapy_effect.append(1.0)
-        p_interaction_effect.append(1.0)
-
-# Inject array outputs back into master data sheets
-master_stats_df['ANOVA_p_PrimingEffect'] = p_priming_effect
-master_stats_df['ANOVA_p_TherapyEffect'] = p_therapy_effect
-master_stats_df['ANOVA_p_InteractionEffect'] = p_interaction_effect
-df_clean['anova_pvalue'] = p_interaction_effect
-
-print("Two-Way ANOVA Complete! Exporting compiled master tables...")
-os.makedirs('Exported_Plots_2Way', exist_ok=True)
-master_stats_df.to_csv('complete_proteomics_TwoWayANOVA_stats.csv', index=False)
-
-print("All systems initialized! Initializing layout dashboard wrapper...")
+print("Successfully loaded calculations! Instantiating layout...")
 
 # ==============================================================================
 # 2. DASHBOARD WEB INTERFACE DESIGN
 # ==============================================================================
 app = dash.Dash(__name__, title="Proteomics Factorial Analyzer", suppress_callback_exceptions=True)
-server = app.server
+server = app.server 
 
 app.layout = html.Div(style={'fontFamily': 'Segoe UI, Arial, sans-serif', 'backgroundColor': '#F4F6F7', 'margin': '0', 'padding': '25px'}, children=[
-    
-    # Header Control Panel Banner
     html.Div(style={'backgroundColor': '#2A4D69', 'padding': '25px', 'borderRadius': '8px', 'marginBottom': '25px', 'color': 'white', 'display': 'flex', 'justifyContent': 'space-between', 'alignItems': 'center'}, children=[
         html.Div(children=[
             html.H1("Proteomics Interactive Multi-Arm Explorer", style={'margin': '0', 'fontSize': '28px'}),
@@ -254,7 +166,6 @@ def switch_tabs(active_tab):
             ])
         ])
 
-# --- TAB 1 DETAILED METADATA COMPLIANCE CARD ---
 @app.callback(
     [Output('profile-boxplot', 'figure'), Output('profile-stats-card', 'children')],
     Input('profile-dropdown', 'value')
@@ -280,7 +191,6 @@ def render_protein_profile(selected_gene):
     ]
     return fig, card_html
 
-# --- TAB 2 BACKEND: VOLCANO SCATTER MATRIX ---
 @app.callback(Output('volcano-plot-graph', 'figure'), Input('volcano-tx-selector', 'value'))
 def render_dynamic_volcano(selected_tx):
     short_tx = selected_tx.split(" ")[0]
@@ -302,31 +212,25 @@ def render_dynamic_volcano(selected_tx):
     fig.update_layout(template='plotly_white')
     return fig
 
-# --- TAB 3 BACKEND: HEATMAP LAYER VIA SELECTABLE TWO-WAY FACTORS ---
 @app.callback(
     Output('heatmap-graph', 'figure'),
     [Input('heatmap-anova-factor-selector', 'value'), Input('heatmap-density-dropdown', 'value')]
 )
 def render_heatmap_matrix(selected_factor, top_n):
-    # Sort dataset row indexes based specifically on the selected factor profile (Main Effects vs Interaction)
     sorted_stats = master_stats_df.sort_values(by=selected_factor).head(top_n)
     matching_genes = sorted_stats['gene_name'].tolist()
     
-    # Isolate relevant rows in cleaned expression profile array dataframe
     expression_sub = df_clean[df_clean['gene_name'].isin(matching_genes)].set_index('gene_name').reindex(matching_genes)
     z_scores = expression_sub[all_samples].apply(lambda r: (r - r.mean()) / r.std(), axis=1).values
-    
     formatted_headers = [f"{g.split(' ')[0]}_{i}" for g, cols in group_cols.items() for i in range(1, len(cols) + 1)]
     
     fig = go.Figure(data=go.Heatmap(z=z_scores, x=formatted_headers, y=matching_genes, colorscale='RdBu_r', zmin=-2, zmax=2))
     fig.update_layout(title=f"Expression Profile Heatmap: Top {top_n} Features Ranked by {selected_factor}", template='plotly_white', height=300+(top_n*14))
     
-    # Add grouping boundary dividing vectors lines to visual chart map
     for b in range(1, len(group_cols)):
         fig.add_vline(x=b*4 - 0.5, line_width=2, line_dash="dash", line_color="black")
     return fig
 
-# --- TAB 4 BACKEND: OVERLAP CLUSTERING AND SUBSET SELECTIONS ---
 @app.callback(
     [Output('overlap-bar-chart', 'figure'), Output('overlap-data-table', 'data'), Output('overlap-table-header', 'children')],
     [Input('overlap-groups-check', 'value'), Input('overlap-direction-radio', 'value'), Input('overlap-fc-input', 'value'), Input('overlap-p-input', 'value')]
@@ -366,12 +270,6 @@ def export_table_to_csv(n_clicks, table_rows):
 # ==============================================================================
 # 4. RUN SYSTEM INTERFACE
 # ==============================================================================
-# ==============================================================================
-# 4. RUN SYSTEM INTERFACE
-# ==============================================================================
 if __name__ == '__main__':
-    # Grab the port assigned by Render, or default to 8050 locally
     port = int(os.environ.get("PORT", 8050))
-    
-    # Force the app to bind to 0.0.0.0 so external cloud traffic can reach it
     app.run(host='0.0.0.0', port=port, debug=False)
