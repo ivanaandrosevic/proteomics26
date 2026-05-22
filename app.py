@@ -13,7 +13,7 @@ import warnings
 warnings.filterwarnings('ignore')
 
 # ==============================================================================
-# 1. BULLETPROOF DATA LOADING & DEFENSIVE TWO-WAY ANOVA CALCULATIONS
+# DATA LOADING & TWO-WAY ANOVA
 # ==============================================================================
 print("🚀 Loading Proteomics Matrix...")
 
@@ -366,5 +366,12 @@ def export_table_to_csv(n_clicks, table_rows):
 # ==============================================================================
 # 4. RUN SYSTEM INTERFACE
 # ==============================================================================
+# ==============================================================================
+# 4. RUN SYSTEM INTERFACE
+# ==============================================================================
 if __name__ == '__main__':
-    app.run(debug=True)
+    # Grab the port assigned by Render, or default to 8050 locally
+    port = int(os.environ.get("PORT", 8050))
+    
+    # Force the app to bind to 0.0.0.0 so external cloud traffic can reach it
+    app.run(host='0.0.0.0', port=port, debug=False)
