@@ -7,23 +7,17 @@ import plotly.graph_objects as go
 import scipy.stats as stats
 import os
 
-# ==============================================================================
-# 1. INSTANT-LOADING CLOUD ARCHITECTURE (PRE-CALCULATED DB)
-# ==============================================================================
-print("🚀 Loading pre-calculated proteomics database...")
+print("Loading pre-calculated proteomics database")
 
-# We load the data directly from the processed CSV to bypass the 60-second cloud timeout limit
 data_file = 'complete_proteomics_TwoWayANOVA_stats.csv'
 raw_file = 'Proteomics_data.csv'
 
 if not os.path.exists(data_file) or not os.path.exists(raw_file):
-    raise FileNotFoundError("Make sure both Proteomics_data.csv and complete_proteomics_TwoWayANOVA_stats.csv are uploaded!")
+    raise FileNotFoundError("File not found")
 
-# Master pre-calculated statistical tables
 master_stats_df = pd.read_csv(data_file)
 df_clean = pd.read_csv(raw_file)
 
-# Maintain structural mapping definitions for charts
 group_cols = {
     'Naive (Healthy Control)': ['1.1', '1.2', '1.3', '1.4'],
     'AL (Pathologically Primed)': ['4.1', '4.2', '4.3', '4.4'],
@@ -35,7 +29,6 @@ group_cols = {
 all_samples = sum(group_cols.values(), [])
 tx_groups = ['IF (Intermittent Fasting)', 'L-Carnitine', 'LPE 18:1', 'LPC 17:0']
 
-# Ensure string cleanup mirrors local state safely
 for col in all_samples:
     df_clean[col] = pd.to_numeric(df_clean[col].astype(str).str.replace("'", "").str.strip(), errors='coerce')
 df_clean = df_clean.dropna(subset=all_samples).copy()
@@ -44,9 +37,8 @@ df_clean['anova_pvalue'] = master_stats_df['ANOVA_p_InteractionEffect']
 
 print("Successfully loaded calculations! Instantiating layout...")
 
-# ==============================================================================
-# 2. DASHBOARD WEB INTERFACE DESIGN
-# ==============================================================================
+# DASHBOARD WEB INTERFACE DESIGN
+
 app = dash.Dash(__name__, title="Proteomics Factorial Analyzer", suppress_callback_exceptions=True)
 server = app.server 
 
@@ -71,9 +63,8 @@ app.layout = html.Div(style={'fontFamily': 'Segoe UI, Arial, sans-serif', 'backg
     html.Div(id='tab-window-content', style={'paddingTop': '25px'})
 ])
 
-# ==============================================================================
-# 3. INTERACTIVE CALLBACK BACKEND ARCHITECTURE
-# ==============================================================================
+# INTERACTIVE BACKEND ARCHITECTURE
+
 @app.callback(Output("master-download-tracker", "data"), Input("btn-master-download", "n_clicks"), prevent_initial_call=True)
 def download_complete_statistical_sheet(n_clicks):
     return dcc.send_data_frame(master_stats_df.to_csv, "complete_proteomics_TwoWayANOVA_stats.csv", index=False)
@@ -267,9 +258,7 @@ def export_table_to_csv(n_clicks, table_rows):
     if not table_rows: return dash.no_update
     return dcc.send_data_frame(pd.DataFrame(table_rows).to_csv, "overlapping_filtered_subset.csv", index=False)
 
-# ==============================================================================
-# 4. RUN SYSTEM INTERFACE
-# ==============================================================================
+# RUN SYSTEM INTERFACE
 if __name__ == '__main__':
     port = int(os.environ.get("PORT", 8050))
     app.run(host='0.0.0.0', port=port, debug=False)
