@@ -5,7 +5,7 @@
 import pandas as pd
 import numpy as np
 import matplotlib
-matplotlib.use('Agg')  # remove this line if you want an interactive window instead
+matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 from matplotlib import rcParams
 from scipy import stats
